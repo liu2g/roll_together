@@ -83,12 +83,14 @@ function disconnectWebsocket(tabId: number): void {
 
   const { socket, roomId }: TabInfo = tabInfo;
   if (socket) {
+    socket.removeAllListeners();
     socket.disconnect();
     delete tabInfo.socket;
   }
   if (roomId) {
     delete tabInfo.roomId;
   }
+  tabInfo.sentConnectionRequest = false;
 
   tryUpdatePopup();
 }
@@ -216,7 +218,11 @@ function connectWebsocket(
     videoProgress
   )}&videoState=${videoState}${urlRoomId ? `&room=${urlRoomId}` : ""}`;
 
-  tabInfo.socket = io(serverUrl, { query, transports: ["websocket"] });
+  // forceNew avoids socket.io-client's per-URL Manager cache. Without it,
+  // creating a new room after the previous one was disconnected can reuse a
+  // stale Manager and skip the handshake with the new `query`, so the new
+  // room never receives updates until the service worker is restarted.
+  tabInfo.socket = io(serverUrl, { query, transports: ["websocket"], forceNew: true });
   tabInfo.socket.on(
     "join",
     (receivedRoomId: string, roomState: States, roomProgress: number): void => {
@@ -270,6 +276,21 @@ extensionAPI.runtime.onConnect.addListener(function (port: chrome.runtime.Port) 
     default:
       throw "Invalid PortName " + port.name;
   }
+});
+
+// When a tab is actually closed (not reloaded), tear down immediately so the
+// remaining peer doesn't receive a final `pause`/`timeupdate` from the dying
+// player during the 3s reconnect grace period.
+extensionAPI.tabs.onRemoved.addListener((tabId: number) => {
+  if (pendingDisconnects[tabId]) {
+    clearTimeout(pendingDisconnects[tabId]);
+    delete pendingDisconnects[tabId];
+  }
+  if (tabsInfo[tabId]) {
+    disconnectWebsocket(tabId);
+    delete tabsInfo[tabId];
+  }
+  getActionAPI().disable(tabId);
 });
 
 extensionAPI.runtime.onInstalled.addListener(() => {

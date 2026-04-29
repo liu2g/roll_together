@@ -20,6 +20,14 @@ let g_lastFrameProgress: number | undefined = undefined;
 let g_heartBeatInterval: NodeJS.Timeout | undefined = undefined; // Keeps Service Worker alive while connected
 let g_pendingMessages: Message[] = [];
 let g_playPromise: Promise<void> | undefined = undefined;
+let g_unloading: boolean = false;
+
+// Suppress spurious player events that fire while the page is being torn down.
+// Without this the browser's teardown can emit a final `pause`/`timeupdate` that
+// gets broadcast to the room, pausing/seeking the remaining peer.
+window.addEventListener("pagehide", () => { g_unloading = true; });
+window.addEventListener("beforeunload", () => { g_unloading = true; });
+window.addEventListener("pageshow", () => { g_unloading = false; });
 
 function getState(stateName: PlayerStateProp): boolean | number {
   return g_player![stateName];
@@ -46,6 +54,9 @@ function getStates(): {
 }
 
 const handleLocalAction = (action: Actions) => (): void => {
+  if (g_unloading) {
+    return;
+  }
   if (ignoreNext[action] === true) {
     ignoreNext[action] = false;
     return;
@@ -145,6 +156,9 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
 
   switch (serviceWorkerMessage.type) {
     case MessageTypes.SW2CS_ROOM_CONNECTION:
+      if (g_heartBeatInterval) {
+        clearInterval(g_heartBeatInterval);
+      }
       g_heartBeatInterval = setInterval(
         () => g_port.postMessage({ type: MessageTypes.CS2SW_HEART_BEAT }),
         20000
